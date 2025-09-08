@@ -598,6 +598,82 @@ var _ = Describe("VolumeAttachmentDetector", func() {
 			Expect(issues).To(BeEmpty()) // Should be filtered out by matchesDriver
 		})
 
+		It("should handle missing inline volume spec in getDriverName", func() {
+			// This exercises getDriverName with no inline spec - should use fallback
+			vaList := &storagev1.VolumeAttachmentList{
+				Items: []storagev1.VolumeAttachment{
+					{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:              "pv-only-va",
+							CreationTimestamp: metav1.NewTime(time.Now().Add(-2 * time.Hour)),
+						},
+						Spec: storagev1.VolumeAttachmentSpec{
+							Attacher: "test.csi.driver",
+							NodeName: "node-1",
+							Source: storagev1.VolumeAttachmentSource{
+								PersistentVolumeName: stringPtr("pv-only-vol"),
+							},
+						},
+						Status: storagev1.VolumeAttachmentStatus{
+							Attached: false,
+						},
+					},
+				},
+			}
+
+			mockVolumeAttachments.EXPECT().
+				List(ctx, metav1.ListOptions{}).
+				Return(vaList, nil)
+
+			issues, err := detector.Detect(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(issues).To(HaveLen(1))
+			
+			// Should use target driver as fallback for getDriverName
+			issue := issues[0]
+			Expect(issue.Driver).To(Equal("test.csi.driver"))
+			Expect(issue.Volume).To(Equal("pv-only-vol"))
+		})
+
+		It("should handle detector without target driver in getDriverName", func() {
+			// Create detector without target driver
+			noTargetDetector := detect.NewVolumeAttachmentDetector(mockClient, "")
+			
+			vaList := &storagev1.VolumeAttachmentList{
+				Items: []storagev1.VolumeAttachment{
+					{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:              "no-target-va",
+							CreationTimestamp: metav1.NewTime(time.Now().Add(-2 * time.Hour)),
+						},
+						Spec: storagev1.VolumeAttachmentSpec{
+							Attacher: "any.csi.driver",
+							NodeName: "node-1",
+							Source: storagev1.VolumeAttachmentSource{
+								PersistentVolumeName: stringPtr("no-target-vol"),
+							},
+						},
+						Status: storagev1.VolumeAttachmentStatus{
+							Attached: false,
+						},
+					},
+				},
+			}
+
+			mockVolumeAttachments.EXPECT().
+				List(ctx, metav1.ListOptions{}).
+				Return(vaList, nil)
+
+			issues, err := noTargetDetector.Detect(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(issues).To(HaveLen(1))
+			
+			// Driver should come from Attacher field, not getDriverName function
+			issue := issues[0]
+			Expect(issue.Driver).To(Equal("any.csi.driver"))
+			Expect(issue.Volume).To(Equal("no-target-vol"))
+		})
+
 		It("should handle non-CSI inline volume specs", func() {
 			// This exercises the conservative behavior in the private functions
 			vaList := &storagev1.VolumeAttachmentList{
@@ -643,7 +719,3 @@ var _ = Describe("VolumeAttachmentDetector", func() {
 	})
 })
 
-// Helper function to create string pointer
-func stringPtr(s string) *string {
-	return &s
-}

@@ -145,20 +145,15 @@ func (d *EventsDetector) analyzeEvent(event corev1.Event) *types.CSIMountIssue {
 		return &types.CSIMountIssue{
 			Type:        types.MultiAttachError,
 			Severity:    d.calculateEventSeverity(event),
+			Node:        d.getNodeForDisplay(event),
 			Volume:      d.extractVolumeFromMessage(event.Message),
+			PVC:         d.getPVCForDisplay(event),
 			Namespace:   event.Namespace,
 			Driver:      d.extractDriverFromMessage(event.Message),
 			Description: fmt.Sprintf("Multi-Attach error detected: %s", event.Message),
 			DetectedBy:  types.EventsMethod,
 			DetectedAt:  time.Now(),
-			Metadata: map[string]string{
-				"event_reason":    event.Reason,
-				"event_type":      event.Type,
-				"involved_object": fmt.Sprintf("%s/%s", event.InvolvedObject.Kind, event.InvolvedObject.Name),
-				"event_time":      eventTime.Format(time.RFC3339),
-				"source_component": event.Source.Component,
-				"count":           fmt.Sprintf("%d", event.Count),
-			},
+			Metadata:    d.buildEventMetadata(event, eventTime),
 		}
 	}
 
@@ -167,20 +162,15 @@ func (d *EventsDetector) analyzeEvent(event corev1.Event) *types.CSIMountIssue {
 		return &types.CSIMountIssue{
 			Type:        types.FailedAttachVolume,
 			Severity:    d.calculateEventSeverity(event),
+			Node:        d.getNodeForDisplay(event),
 			Volume:      d.extractVolumeFromMessage(event.Message),
+			PVC:         d.getPVCForDisplay(event),
 			Namespace:   event.Namespace,
 			Driver:      d.extractDriverFromMessage(event.Message),
 			Description: fmt.Sprintf("Failed to attach volume: %s", event.Message),
 			DetectedBy:  types.EventsMethod,
 			DetectedAt:  time.Now(),
-			Metadata: map[string]string{
-				"event_reason":     event.Reason,
-				"event_type":       event.Type,
-				"involved_object":  fmt.Sprintf("%s/%s", event.InvolvedObject.Kind, event.InvolvedObject.Name),
-				"event_time":       eventTime.Format(time.RFC3339),
-				"source_component": event.Source.Component,
-				"count":            fmt.Sprintf("%d", event.Count),
-			},
+			Metadata:    d.buildEventMetadata(event, eventTime),
 		}
 	}
 
@@ -191,62 +181,47 @@ func (d *EventsDetector) analyzeEvent(event corev1.Event) *types.CSIMountIssue {
 			return &types.CSIMountIssue{
 				Type:        types.StuckMountReference,
 				Severity:    d.calculateEventSeverity(event),
+				Node:        d.getNodeForDisplay(event),
 				Volume:      d.extractVolumeFromMessage(event.Message),
+				PVC:         d.getPVCForDisplay(event),
 				Namespace:   event.Namespace,
 				Driver:      d.extractDriverFromMessage(event.Message),
 				Description: fmt.Sprintf("Mount reference cleanup failure: %s", event.Message),
 				DetectedBy:  types.EventsMethod,
 				DetectedAt:  time.Now(),
-				Metadata: map[string]string{
-					"event_reason":     event.Reason,
-					"event_type":       event.Type,
-					"involved_object":  fmt.Sprintf("%s/%s", event.InvolvedObject.Kind, event.InvolvedObject.Name),
-					"event_time":       eventTime.Format(time.RFC3339),
-					"source_component": event.Source.Component,
-					"count":            fmt.Sprintf("%d", event.Count),
-				},
+				Metadata:    d.buildEventMetadata(event, eventTime),
 			}
 		}
 
 		return &types.CSIMountIssue{
 			Type:        types.CSIOperationFailure,
 			Severity:    d.calculateEventSeverity(event),
+			Node:        d.getNodeForDisplay(event),
 			Volume:      d.extractVolumeFromMessage(event.Message),
+			PVC:         d.getPVCForDisplay(event),
 			Namespace:   event.Namespace,
 			Driver:      d.extractDriverFromMessage(event.Message),
 			Description: fmt.Sprintf("Failed to mount volume: %s", event.Message),
 			DetectedBy:  types.EventsMethod,
 			DetectedAt:  time.Now(),
-			Metadata: map[string]string{
-				"event_reason":     event.Reason,
-				"event_type":       event.Type,
-				"involved_object":  fmt.Sprintf("%s/%s", event.InvolvedObject.Kind, event.InvolvedObject.Name),
-				"event_time":       eventTime.Format(time.RFC3339),
-				"source_component": event.Source.Component,
-				"count":            fmt.Sprintf("%d", event.Count),
-			},
+			Metadata:    d.buildEventMetadata(event, eventTime),
 		}
 	}
 
-	// Other CSI-related warning events
-	if event.Type == "Warning" && (strings.Contains(event.Message, "CSI") || strings.Contains(event.Reason, "Volume")) {
+	// Other CSI-related warning events - be much more specific
+	if event.Type == "Warning" && d.isCSIRelatedEvent(event) {
 		return &types.CSIMountIssue{
 			Type:        types.CSIOperationFailure,
 			Severity:    d.calculateEventSeverity(event),
+			Node:        d.getNodeForDisplay(event),
 			Volume:      d.extractVolumeFromMessage(event.Message),
+			PVC:         d.getPVCForDisplay(event),
 			Namespace:   event.Namespace,
 			Driver:      d.extractDriverFromMessage(event.Message),
 			Description: fmt.Sprintf("CSI operation issue: %s", event.Message),
 			DetectedBy:  types.EventsMethod,
 			DetectedAt:  time.Now(),
-			Metadata: map[string]string{
-				"event_reason":     event.Reason,
-				"event_type":       event.Type,
-				"involved_object":  fmt.Sprintf("%s/%s", event.InvolvedObject.Kind, event.InvolvedObject.Name),
-				"event_time":       eventTime.Format(time.RFC3339),
-				"source_component": event.Source.Component,
-				"count":            fmt.Sprintf("%d", event.Count),
-			},
+			Metadata:    d.buildEventMetadata(event, eventTime),
 		}
 	}
 
@@ -278,7 +253,7 @@ func (d *EventsDetector) calculateEventSeverity(event corev1.Event) types.IssueS
 
 // extractVolumeFromMessage attempts to extract volume information from event message
 func (d *EventsDetector) extractVolumeFromMessage(message string) string {
-	// Look for PVC patterns
+	// Look for PVC patterns (most common for CSI volumes)
 	if strings.Contains(message, "pvc-") {
 		parts := strings.Fields(message)
 		for _, part := range parts {
@@ -290,14 +265,72 @@ func (d *EventsDetector) extractVolumeFromMessage(message string) string {
 		}
 	}
 
-	// Look for volume handle patterns
-	if strings.Contains(message, "volume") && strings.Contains(message, "\"") {
-		start := strings.Index(message, "volume \"")
-		if start != -1 {
-			start += 8 // len("volume \"")
-			end := strings.Index(message[start:], "\"")
-			if end != -1 {
-				return message[start : start+end]
+	// Look for volume handle patterns with quotes
+	volumePatterns := []string{
+		"volume \"",
+		"Volume \"",
+		"volumeHandle \"",
+		"volumeId \"",
+		"volume_id \"",
+	}
+	
+	for _, pattern := range volumePatterns {
+		if strings.Contains(message, pattern) {
+			start := strings.Index(message, pattern)
+			if start != -1 {
+				start += len(pattern)
+				end := strings.Index(message[start:], "\"")
+				if end != -1 {
+					volumeHandle := message[start : start+end]
+					if volumeHandle != "" && volumeHandle != "unknown" {
+						return volumeHandle
+					}
+				}
+			}
+		}
+	}
+	
+	// Look for volume names after specific keywords without quotes
+	volumeKeywords := []string{"volume", "Volume", "volumeHandle", "volumeId"}
+	words := strings.Fields(message)
+	
+	for i, word := range words {
+		for _, keyword := range volumeKeywords {
+			if strings.EqualFold(word, keyword) && i+1 < len(words) {
+				nextWord := strings.Trim(words[i+1], "\"',.()[]:")
+				if nextWord != "" && nextWord != "unknown" && !strings.Contains(nextWord, " ") {
+					return nextWord
+				}
+			}
+		}
+	}
+	
+	// Look for any word that looks like a volume handle (contains pvc- or is a long alphanumeric string)
+	for _, word := range words {
+		cleanWord := strings.Trim(word, "\"',.()[]:")
+		
+		// Handle malformed cases like "volumes=[volume-name"
+		if strings.Contains(cleanWord, "volumes=[") {
+			// Extract everything after "volumes=["
+			parts := strings.Split(cleanWord, "volumes=[")
+			if len(parts) > 1 {
+				volumePart := parts[1]
+				// Remove any trailing brackets or punctuation
+				volumePart = strings.Trim(volumePart, "[]()\"',.")
+				if volumePart != "" && volumePart != "unknown" {
+					return volumePart
+				}
+			}
+		}
+		
+		if strings.HasPrefix(cleanWord, "pvc-") {
+			return cleanWord
+		}
+		// Look for long alphanumeric strings that might be volume handles
+		if len(cleanWord) > 10 && strings.ContainsAny(cleanWord, "0123456789") && strings.ContainsAny(cleanWord, "abcdefghijklmnopqrstuvwxyz") {
+			// Exclude common kubernetes token patterns
+			if !strings.Contains(cleanWord, "kube-api-access-") && !strings.Contains(cleanWord, "default-token-") {
+				return cleanWord
 			}
 		}
 	}
@@ -329,6 +362,218 @@ func (d *EventsDetector) extractDriverFromMessage(message string) string {
 	}
 
 	return "unknown"
+}
+
+// extractNodeFromEvent attempts to extract node information from the event
+func (d *EventsDetector) extractNodeFromEvent(event corev1.Event) string {
+	// If the involved object is a Node, return its name
+	if event.InvolvedObject.Kind == "Node" {
+		return event.InvolvedObject.Name
+	}
+	
+	// Try to extract from source host (for events reported by kubelet)
+	if event.Source.Host != "" {
+		return event.Source.Host
+	}
+	
+	// Try to extract node name from the message for volume-related events
+	nodePatterns := []string{
+		"node \"",
+		"Node \"",
+		" node ",
+		" Node ",
+	}
+	
+	for _, pattern := range nodePatterns {
+		if strings.Contains(event.Message, pattern) {
+			// Find the start of the node name
+			start := strings.Index(event.Message, pattern)
+			if start != -1 {
+				start += len(pattern)
+				
+				// Handle quoted node names
+				if strings.HasSuffix(pattern, "\"") {
+					end := strings.Index(event.Message[start:], "\"")
+					if end != -1 {
+						return event.Message[start : start+end]
+					}
+				} else {
+					// Handle space-separated node names
+					words := strings.Fields(event.Message[start:])
+					if len(words) > 0 {
+						// Clean up punctuation
+						nodeName := strings.Trim(words[0], "\"',.()[]:")
+						if nodeName != "" {
+							return nodeName
+						}
+					}
+				}
+			}
+		}
+	}
+	
+	return ""
+}
+
+// extractPVCFromEvent attempts to extract PVC information from the event
+func (d *EventsDetector) extractPVCFromEvent(event corev1.Event) string {
+	// If the involved object is a PVC, return its name (this is the primary case)
+	if event.InvolvedObject.Kind == "PersistentVolumeClaim" {
+		return event.InvolvedObject.Name
+	}
+	
+	// For Pod events, try to extract PVC name from the message
+	if event.InvolvedObject.Kind == "Pod" {
+		// Try to extract PVC name from the message
+		pvcPatterns := []string{
+			"pvc \"",
+			"PVC \"",
+			"persistentvolumeclaim \"",
+			"PersistentVolumeClaim \"",
+			"claim \"",
+		}
+		
+		for _, pattern := range pvcPatterns {
+			if strings.Contains(event.Message, pattern) {
+				start := strings.Index(event.Message, pattern)
+				if start != -1 {
+					start += len(pattern)
+					end := strings.Index(event.Message[start:], "\"")
+					if end != -1 {
+						return event.Message[start : start+end]
+					}
+				}
+			}
+		}
+		
+		// Look for PVC name patterns without quotes
+		pvcWords := []string{"pvc", "PVC", "claim"}
+		words := strings.Fields(event.Message)
+		
+		for i, word := range words {
+			for _, pvcWord := range pvcWords {
+				if strings.EqualFold(word, pvcWord) && i+1 < len(words) {
+					// Next word might be the PVC name
+					nextWord := strings.Trim(words[i+1], "\"',.()[]:")
+					if nextWord != "" && !strings.Contains(nextWord, " ") {
+						return nextWord
+					}
+				}
+			}
+		}
+	}
+	
+	return ""
+}
+
+// getNodeForDisplay determines what to show in the Node column for the event
+func (d *EventsDetector) getNodeForDisplay(event corev1.Event) string {
+	// If the involved object is a Node, show its name
+	if event.InvolvedObject.Kind == "Node" {
+		return event.InvolvedObject.Name
+	}
+	
+	// For volume-related events on pods, try to extract the node
+	if event.InvolvedObject.Kind == "Pod" {
+		// Try to extract from source host (most reliable for pod events)
+		if event.Source.Host != "" {
+			return event.Source.Host
+		}
+		
+		// Try to extract node name from the message
+		return d.extractNodeFromEvent(event)
+	}
+	
+	// For other object types, check source host
+	if event.Source.Host != "" {
+		return event.Source.Host
+	}
+	
+	return ""
+}
+
+// getPVCForDisplay determines what to show in the PVC column for the event
+func (d *EventsDetector) getPVCForDisplay(event corev1.Event) string {
+	// If the involved object is a PVC, show it in format "name" or "namespace/name" if needed
+	if event.InvolvedObject.Kind == "PersistentVolumeClaim" {
+		pvcName := event.InvolvedObject.Name
+		// If the PVC is not in the same namespace as the event, show the full reference
+		if event.InvolvedObject.Namespace != "" && event.InvolvedObject.Namespace != event.Namespace {
+			return fmt.Sprintf("%s/%s", event.InvolvedObject.Namespace, pvcName)
+		}
+		return pvcName
+	}
+	
+	// For Pod events, try to extract the PVC name from the message
+	if event.InvolvedObject.Kind == "Pod" {
+		return d.extractPVCFromEvent(event)
+	}
+	
+	// For other object types, don't show anything in PVC column
+	return ""
+}
+
+// isCSIRelatedEvent checks if an event is specifically related to CSI operations
+func (d *EventsDetector) isCSIRelatedEvent(event corev1.Event) bool {
+	// Explicit CSI mentions in message or reason
+	if strings.Contains(event.Message, "CSI") || strings.Contains(event.Reason, "CSI") {
+		return true
+	}
+	
+	// Specific CSI driver patterns
+	csiDriverPatterns := []string{
+		".csi.",
+		"csi.openstack.org",
+		"csi.ceph.com",
+		"csi.aws.com", 
+		"csi.azure.com",
+		"csi.storage.gke.io",
+	}
+	
+	for _, pattern := range csiDriverPatterns {
+		if strings.Contains(event.Message, pattern) {
+			return true
+		}
+	}
+	
+	// Specific volume-related errors that are likely CSI-related
+	csiVolumeReasons := []string{
+		"VolumeBindingFailed",
+		"ProvisioningFailed", 
+		"VolumeFailedMount",
+		"VolumeFailedUnmount",
+		"VolumeResizeFailed",
+		"VolumeResizing",
+	}
+	
+	for _, reason := range csiVolumeReasons {
+		if event.Reason == reason {
+			return true
+		}
+	}
+	
+	// Check if event mentions persistent volume operations with storage class
+	if (strings.Contains(event.Message, "StorageClass") || strings.Contains(event.Message, "storageclass")) &&
+		(strings.Contains(event.Message, "PersistentVolume") || strings.Contains(event.Message, "volume")) {
+		return true
+	}
+	
+	// Exclude common non-CSI events
+	excludePatterns := []string{
+		"kube-api-access-",
+		"default-token-",
+		"configmap",
+		"secret",
+		"serviceaccount",
+	}
+	
+	for _, pattern := range excludePatterns {
+		if strings.Contains(event.Message, pattern) {
+			return false
+		}
+	}
+	
+	return false
 }
 
 // GetRecentEvents returns recent events that might be relevant to CSI mount issues
@@ -369,6 +614,83 @@ func (d *EventsDetector) GetRecentEvents(ctx context.Context, maxResults int) ([
 	}
 
 	return relevantEvents, nil
+}
+
+// buildEventMetadata creates comprehensive metadata from Kubernetes event
+func (d *EventsDetector) buildEventMetadata(event corev1.Event, eventTime time.Time) map[string]string {
+	metadata := map[string]string{
+		// Full event message - this is what the user specifically requested
+		"full_event_message": event.Message,
+		
+		// Event details
+		"event_reason":       event.Reason,
+		"event_type":         event.Type,
+		"event_time":         eventTime.Format(time.RFC3339),
+		"count":              fmt.Sprintf("%d", event.Count),
+		
+		// Involved object details
+		"involved_object_kind":       event.InvolvedObject.Kind,
+		"involved_object_name":       event.InvolvedObject.Name,
+		"involved_object_namespace":  event.InvolvedObject.Namespace,
+		"involved_object_uid":        string(event.InvolvedObject.UID),
+		"involved_object":            fmt.Sprintf("%s/%s", event.InvolvedObject.Kind, event.InvolvedObject.Name),
+		
+		// Event metadata
+		"event_namespace":     event.Namespace,
+		"source_component":    event.Source.Component,
+		"source_host":         event.Source.Host,
+		"reporting_controller": event.ReportingController,
+		"reporting_instance":   event.ReportingInstance,
+	}
+
+	// Add resource version if available
+	if event.InvolvedObject.ResourceVersion != "" {
+		metadata["involved_object_resource_version"] = event.InvolvedObject.ResourceVersion
+	}
+
+	// Add API version if available
+	if event.InvolvedObject.APIVersion != "" {
+		metadata["involved_object_api_version"] = event.InvolvedObject.APIVersion
+	}
+
+	// Add field path if available (useful for pod-specific events)
+	if event.InvolvedObject.FieldPath != "" {
+		metadata["involved_object_field_path"] = event.InvolvedObject.FieldPath
+	}
+
+	// For pod events, extract additional pod-specific metadata
+	if event.InvolvedObject.Kind == "Pod" {
+		metadata["pod_name"] = event.InvolvedObject.Name
+		metadata["pod_namespace"] = event.InvolvedObject.Namespace
+		if event.InvolvedObject.Namespace == "" {
+			metadata["pod_namespace"] = event.Namespace
+		}
+	}
+
+	// For PVC events, extract PVC-specific metadata
+	if event.InvolvedObject.Kind == "PersistentVolumeClaim" {
+		metadata["pvc_name"] = event.InvolvedObject.Name
+		metadata["pvc_namespace"] = event.InvolvedObject.Namespace
+		if event.InvolvedObject.Namespace == "" {
+			metadata["pvc_namespace"] = event.Namespace
+		}
+	}
+
+	// For Node events, extract node-specific metadata
+	if event.InvolvedObject.Kind == "Node" {
+		metadata["node_name"] = event.InvolvedObject.Name
+	}
+
+	// Try to extract additional volume-specific information from the message
+	if volumeHandle := d.extractVolumeFromMessage(event.Message); volumeHandle != "unknown" {
+		metadata["extracted_volume_handle"] = volumeHandle
+	}
+
+	if driver := d.extractDriverFromMessage(event.Message); driver != "unknown" {
+		metadata["extracted_csi_driver"] = driver
+	}
+
+	return metadata
 }
 
 // isVolumeRelatedEvent checks if an event is related to volume operations

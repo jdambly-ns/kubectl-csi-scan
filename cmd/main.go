@@ -469,22 +469,40 @@ func outputTable(result *types.DetectionResult) error {
 	// Event-based Issues
 	if len(eventIssues) > 0 {
 		fmt.Printf("EVENT-BASED ISSUES:\n")
-		fmt.Printf("%-20s %-30s %s\n", "NODE", "PVC", "VOLUME")
-		fmt.Printf("%-20s %-30s %s\n", "----", "---", "------")
+		fmt.Printf("%-15s %-40s %-15s %-35s %s\n", "NAMESPACE", "OBJECT", "NODE", "VOLUME", "MESSAGE")
+		fmt.Printf("%-15s %-40s %-15s %-35s %s\n", "---------", "------", "----", "------", "-------")
 		for _, issue := range eventIssues {
+			// Extract namespace
+			namespace := issue.Namespace
+			if namespace == "" {
+				namespace = "-"
+			}
+			
+			// Extract involved object from metadata
+			object := "-"
+			if involvedObject, exists := issue.Metadata["involved_object"]; exists {
+				object = involvedObject
+			}
+			
+			// Extract node
 			node := issue.Node
 			if node == "" {
 				node = "-"
 			}
-			pvc := issue.PVC
-			if pvc == "" {
-				pvc = "-"
-			}
+			
+			// Extract volume
 			volume := issue.Volume
 			if volume == "" {
 				volume = "-"
 			}
-			fmt.Printf("%-20s %-30s %s\n", node, pvc, volume)
+			
+			// Extract the full event message from metadata - no truncation
+			message := issue.Description
+			if fullMessage, exists := issue.Metadata["full_event_message"]; exists {
+				message = fullMessage
+			}
+			
+			fmt.Printf("%-15s %-40s %-15s %-35s %s\n", namespace, object, node, volume, message)
 		}
 		fmt.Printf("\n")
 	}

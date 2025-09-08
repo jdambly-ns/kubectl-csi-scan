@@ -326,27 +326,105 @@ var _ = Describe("Detector", func() {
 		})
 
 		It("should filter issues by different severity levels", func() {
+			// Create VolumeAttachments with different severities to test filtering
+			vaList := &storagev1.VolumeAttachmentList{
+				Items: []storagev1.VolumeAttachment{
+					{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:              "critical-va",
+							CreationTimestamp: metav1.NewTime(time.Now().Add(-48 * time.Hour)),
+						},
+						Spec: storagev1.VolumeAttachmentSpec{
+							Attacher: "test.csi.driver",
+							NodeName: "node-1",
+							Source: storagev1.VolumeAttachmentSource{
+								PersistentVolumeName: stringPtr("critical-pv"),
+							},
+						},
+						Status: storagev1.VolumeAttachmentStatus{
+							Attached: false,
+						},
+					},
+					{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:              "high-va",
+							CreationTimestamp: metav1.NewTime(time.Now().Add(-12 * time.Hour)),
+						},
+						Spec: storagev1.VolumeAttachmentSpec{
+							Attacher: "test.csi.driver",
+							NodeName: "node-2",
+							Source: storagev1.VolumeAttachmentSource{
+								PersistentVolumeName: stringPtr("high-pv"),
+							},
+						},
+						Status: storagev1.VolumeAttachmentStatus{
+							Attached: false,
+						},
+					},
+					{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:              "medium-va",
+							CreationTimestamp: metav1.NewTime(time.Now().Add(-3 * time.Hour)),
+						},
+						Spec: storagev1.VolumeAttachmentSpec{
+							Attacher: "test.csi.driver",
+							NodeName: "node-3",
+							Source: storagev1.VolumeAttachmentSource{
+								PersistentVolumeName: stringPtr("medium-pv"),
+							},
+						},
+						Status: storagev1.VolumeAttachmentStatus{
+							Attached: false,
+						},
+					},
+					{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:              "low-va",
+							CreationTimestamp: metav1.NewTime(time.Now().Add(-30 * time.Minute)),
+						},
+						Spec: storagev1.VolumeAttachmentSpec{
+							Attacher: "test.csi.driver",
+							NodeName: "node-4",
+							Source: storagev1.VolumeAttachmentSource{
+								PersistentVolumeName: stringPtr("low-pv"),
+							},
+						},
+						Status: storagev1.VolumeAttachmentStatus{
+							Attached: false,
+						},
+					},
+				},
+			}
+
 			// Test different minimum severity filters
+			// Based on calculateStuckAttachmentSeverity:
+			// 48h = Critical, 12h = Critical, 3h = High, 30min = Low
 			testCases := []struct {
-				minSeverity     types.IssueSeverity
-				expectedCount   int
-				description     string
+				minSeverity   types.IssueSeverity
+				expectedCount int
+				description   string
 			}{
 				{types.SeverityLow, 4, "should include all issues with SeverityLow filter"},
 				{types.SeverityMedium, 3, "should filter out low severity with SeverityMedium filter"},
-				{types.SeverityHigh, 2, "should filter out medium and low with SeverityHigh filter"},
-				{types.SeverityCritical, 1, "should include only critical with SeverityCritical filter"},
+				{types.SeverityHigh, 3, "should filter out medium and low with SeverityHigh filter"},
+				{types.SeverityCritical, 2, "should include only critical with SeverityCritical filter"},
+				{"", 4, "should include all issues with empty severity filter"},
 			}
 
 			for _, tc := range testCases {
-				// Since we can't directly call the private filterBySeverity function,
-				// we'll test it indirectly by creating detectors with different min severity
 				options := types.DetectionOptions{
 					Methods:     []types.DetectionMethod{types.VolumeAttachmentMethod},
 					MinSeverity: tc.minSeverity,
 				}
 				testDetector := detect.NewDetector(mockClient, options)
-				Expect(testDetector).NotTo(BeNil(), tc.description)
+
+				mockVolumeAttachments := mocks.NewMockVolumeAttachmentInterface(ctrl)
+				mockStorageV1.EXPECT().VolumeAttachments().Return(mockVolumeAttachments)
+				mockVolumeAttachments.EXPECT().List(gomock.Any(), gomock.Any()).Return(vaList, nil)
+
+				result, err := testDetector.DetectAll(ctx)
+				Expect(err).NotTo(HaveOccurred(), tc.description)
+				Expect(result.Issues).To(HaveLen(tc.expectedCount), tc.description)
 			}
 		})
 	})
@@ -363,4 +441,9 @@ type testError struct {
 
 func (e *testError) Error() string {
 	return e.msg
+}
+
+// Helper function to create string pointer
+func stringPtr(s string) *string {
+	return &s
 }

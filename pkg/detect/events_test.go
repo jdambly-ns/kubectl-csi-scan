@@ -728,4 +728,254 @@ var _ = Describe("EventsDetector", func() {
 			Entry("unknown driver", "Some generic volume error", "unknown"),
 		)
 	})
+
+	Context("Node and PVC Extraction", func() {
+		BeforeEach(func() {
+			detector = detect.NewEventsDetector(mockClient, targetDriver, lookbackDuration)
+		})
+
+		Context("extractNodeFromEvent", func() {
+			DescribeTable("node extraction from different event types",
+				func(involvedKind, involvedName, sourceHost, message, expectedNode string) {
+					recentTime := time.Now().Add(-30 * time.Minute)
+					eventList := &corev1.EventList{
+						Items: []corev1.Event{
+							{
+								ObjectMeta: metav1.ObjectMeta{
+									Name:      "test-event",
+									Namespace: "default",
+								},
+								Type:          "Warning",
+								Reason:        "FailedAttachVolume",
+								Message:       message,
+								LastTimestamp: metav1.NewTime(recentTime),
+								EventTime:     metav1.NewMicroTime(recentTime),
+								Source: corev1.EventSource{
+									Component: "attachdetach-controller",
+									Host:      sourceHost,
+								},
+								InvolvedObject: corev1.ObjectReference{
+									Kind: involvedKind,
+									Name: involvedName,
+								},
+								Count: 1,
+							},
+						},
+					}
+
+					mockEvents.EXPECT().
+						List(ctx, metav1.ListOptions{}).
+						Return(eventList, nil)
+
+					issues, err := detector.Detect(ctx)
+					Expect(err).NotTo(HaveOccurred())
+					if expectedNode != "" {
+						Expect(issues).To(HaveLen(1))
+						Expect(issues[0].Node).To(Equal(expectedNode))
+					}
+				},
+				Entry("from Node involved object", "Node", "worker-node-1", "", "Volume failed", "worker-node-1"),
+				Entry("from source host", "Pod", "test-pod", "worker-node-2", "Volume failed", "worker-node-2"),
+				Entry("from quoted node in message", "Pod", "test-pod", "", "Failed to attach volume to node \"worker-node-3\"", "worker-node-3"),
+				Entry("from unquoted node in message", "Pod", "test-pod", "", "Volume attachment failed on node worker-node-4 due to error", "worker-node-4"),
+				Entry("from Node with capital N", "Pod", "test-pod", "", "Volume error on Node worker-node-5", "worker-node-5"),
+				Entry("from space-separated node", "Pod", "test-pod", "", "Error on node worker-node-6:", "worker-node-6"),
+			)
+		})
+
+		Context("extractPVCFromEvent", func() {
+			DescribeTable("PVC extraction from different event types",
+				func(involvedKind, involvedName, involvedNamespace, message, expectedPVC string) {
+					recentTime := time.Now().Add(-30 * time.Minute)
+					eventList := &corev1.EventList{
+						Items: []corev1.Event{
+							{
+								ObjectMeta: metav1.ObjectMeta{
+									Name:      "test-event",
+									Namespace: "default",
+								},
+								Type:          "Warning",
+								Reason:        "FailedAttachVolume",
+								Message:       message,
+								LastTimestamp: metav1.NewTime(recentTime),
+								EventTime:     metav1.NewMicroTime(recentTime),
+								Source: corev1.EventSource{
+									Component: "attachdetach-controller",
+								},
+								InvolvedObject: corev1.ObjectReference{
+									Kind:      involvedKind,
+									Name:      involvedName,
+									Namespace: involvedNamespace,
+								},
+								Count: 1,
+							},
+						},
+					}
+
+					mockEvents.EXPECT().
+						List(ctx, metav1.ListOptions{}).
+						Return(eventList, nil)
+
+					issues, err := detector.Detect(ctx)
+					Expect(err).NotTo(HaveOccurred())
+					if expectedPVC != "" {
+						Expect(issues).To(HaveLen(1))
+						Expect(issues[0].PVC).To(ContainSubstring(expectedPVC))
+					}
+				},
+				Entry("from PVC involved object", "PersistentVolumeClaim", "my-pvc", "default", "Volume failed", "my-pvc"),
+				Entry("from quoted PVC in message", "Pod", "test-pod", "default", "Failed to mount volume from PVC \"data-pvc\"", "data-pvc"),
+				Entry("from claim in message", "Pod", "test-pod", "default", "Mount failed for claim cache-pvc", "cache-pvc"),
+				Entry("from pvc prefix in message", "Pod", "test-pod", "default", "Error with pvc logs-pvc", "logs-pvc"),
+				Entry("from volume claim in message", "Pod", "test-pod", "default", "Failed to attach volume claim storage-pvc", "storage-pvc"),
+			)
+		})
+
+		Context("isCSIRelatedEvent", func() {
+			DescribeTable("CSI event filtering",
+				func(reason, message, component string, shouldDetect bool) {
+					recentTime := time.Now().Add(-30 * time.Minute)
+					eventList := &corev1.EventList{
+						Items: []corev1.Event{
+							{
+								ObjectMeta: metav1.ObjectMeta{
+									Name:      "test-event",
+									Namespace: "default",
+								},
+								Type:          "Warning",
+								Reason:        reason,
+								Message:       message,
+								LastTimestamp: metav1.NewTime(recentTime),
+								EventTime:     metav1.NewMicroTime(recentTime),
+								Source: corev1.EventSource{
+									Component: component,
+								},
+								InvolvedObject: corev1.ObjectReference{
+									Kind: "Pod",
+									Name: "test-pod",
+								},
+								Count: 1,
+							},
+						},
+					}
+
+					mockEvents.EXPECT().
+						List(ctx, metav1.ListOptions{}).
+						Return(eventList, nil)
+
+					issues, err := detector.Detect(ctx)
+					Expect(err).NotTo(HaveOccurred())
+					if shouldDetect {
+						Expect(issues).To(HaveLen(1))
+					} else {
+						Expect(issues).To(BeEmpty())
+					}
+				},
+				Entry("CSI reason - FailedAttachVolume", "FailedAttachVolume", "Volume error for test.csi.driver", "kubelet", true),
+				Entry("CSI reason - FailedMount", "FailedMount", "Mount error for test.csi.driver", "kubelet", true),
+				Entry("CSI reason - VolumeResizeFailed", "VolumeResizeFailed", "Resize error for test.csi.driver", "kubelet", true),
+				Entry("CSI message with driver", "SomeReason", "CSI driver test.csi.driver failed", "kubelet", true),
+				Entry("CSI component", "SomeReason", "Some error", "csi-driver", false),
+				Entry("Non-CSI event", "ImagePullBackOff", "Image pull failed", "kubelet", false),
+			)
+		})
+
+		Context("eventMatchesDriver", func() {
+			It("should match events with specific driver when target driver is set", func() {
+				// Test with target driver set
+				driverDetector := detect.NewEventsDetector(mockClient, "ebs.csi.aws.com", lookbackDuration)
+				
+				recentTime := time.Now().Add(-30 * time.Minute)
+				eventList := &corev1.EventList{
+					Items: []corev1.Event{
+						{
+							ObjectMeta: metav1.ObjectMeta{
+								Name:      "matching-event",
+								Namespace: "default",
+							},
+							Type:          "Warning",
+							Reason:        "FailedAttachVolume",
+							Message:       "ebs.csi.aws.com attachment failed",
+							LastTimestamp: metav1.NewTime(recentTime),
+							EventTime:     metav1.NewMicroTime(recentTime),
+							Source: corev1.EventSource{
+								Component: "attachdetach-controller",
+							},
+							InvolvedObject: corev1.ObjectReference{
+								Kind: "Pod",
+								Name: "test-pod",
+							},
+							Count: 1,
+						},
+						{
+							ObjectMeta: metav1.ObjectMeta{
+								Name:      "non-matching-event",
+								Namespace: "default",
+							},
+							Type:          "Warning",
+							Reason:        "FailedAttachVolume",
+							Message:       "other.csi.driver attachment failed",
+							LastTimestamp: metav1.NewTime(recentTime),
+							EventTime:     metav1.NewMicroTime(recentTime),
+							Source: corev1.EventSource{
+								Component: "attachdetach-controller",
+							},
+							InvolvedObject: corev1.ObjectReference{
+								Kind: "Pod",
+								Name: "test-pod-2",
+							},
+							Count: 1,
+						},
+					},
+				}
+
+				mockEvents.EXPECT().
+					List(ctx, metav1.ListOptions{}).
+					Return(eventList, nil)
+
+				issues, err := driverDetector.Detect(ctx)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(issues).To(HaveLen(1))
+				Expect(issues[0].Driver).To(Equal("ebs.csi.aws.com"))
+			})
+
+			It("should include all CSI events when no target driver is set", func() {
+				// Test without target driver
+				allDriverDetector := detect.NewEventsDetector(mockClient, "", lookbackDuration)
+				
+				recentTime := time.Now().Add(-30 * time.Minute)
+				eventList := &corev1.EventList{
+					Items: []corev1.Event{
+						{
+							ObjectMeta: metav1.ObjectMeta{
+								Name:      "any-csi-event",
+								Namespace: "default",
+							},
+							Type:          "Warning",
+							Reason:        "FailedAttachVolume",
+							Message:       "any.csi.driver attachment failed",
+							LastTimestamp: metav1.NewTime(recentTime),
+							EventTime:     metav1.NewMicroTime(recentTime),
+							Source: corev1.EventSource{
+								Component: "attachdetach-controller",
+							},
+							InvolvedObject: corev1.ObjectReference{
+								Kind: "Pod",
+								Name: "test-pod",
+							},
+							Count: 1,
+						},
+					},
+				}
+
+				mockEvents.EXPECT().
+					List(ctx, metav1.ListOptions{}).
+					Return(eventList, nil)
+
+				issues, err := allDriverDetector.Detect(ctx)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(issues).To(HaveLen(1))
+			})
+		})
+	})
 })
