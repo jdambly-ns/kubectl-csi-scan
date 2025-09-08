@@ -404,28 +404,111 @@ func outputTable(result *types.DetectionResult) error {
 		fmt.Printf("\n")
 	}
 
-	// Issues table with full names - no fixed width for PVC/Volume to avoid truncation
-	fmt.Printf("ISSUES:\n")
-	fmt.Printf("%-20s %-40s %s\n", "NODE", "PVC", "VOLUME")
-	fmt.Printf("%-20s %-40s %s\n", "----", "---", "------")
-	
+	// Group issues by detection method for clearer output
+	volumeAttachmentIssues := []types.CSIMountIssue{}
+	crossNodePVCIssues := []types.CSIMountIssue{}
+	eventIssues := []types.CSIMountIssue{}
+	otherIssues := []types.CSIMountIssue{}
+
 	for _, issue := range result.Issues {
-		node := issue.Node
-		if node == "" {
-			node = "-"
+		switch issue.DetectedBy {
+		case types.VolumeAttachmentMethod:
+			volumeAttachmentIssues = append(volumeAttachmentIssues, issue)
+		case types.CrossNodePVCMethod:
+			crossNodePVCIssues = append(crossNodePVCIssues, issue)
+		case types.EventsMethod:
+			eventIssues = append(eventIssues, issue)
+		default:
+			otherIssues = append(otherIssues, issue)
 		}
-		
-		pvc := issue.PVC
-		if pvc == "" {
-			pvc = "-"
+	}
+
+	// Volume Attachment Issues (show Node and Volume)
+	if len(volumeAttachmentIssues) > 0 {
+		fmt.Printf("VOLUME ATTACHMENT ISSUES:\n")
+		fmt.Printf("%-20s %s\n", "NODE", "VOLUME")
+		fmt.Printf("%-20s %s\n", "----", "------")
+		for _, issue := range volumeAttachmentIssues {
+			node := issue.Node
+			if node == "" {
+				node = "-"
+			}
+			volume := issue.Volume
+			if volume == "" {
+				volume = "-"
+			}
+			fmt.Printf("%-20s %s\n", node, volume)
 		}
-		
-		volume := issue.Volume
-		if volume == "" {
-			volume = "-"
+		fmt.Printf("\n")
+	}
+
+	// Cross-Node PVC Issues (show PVC and affected nodes from metadata)
+	if len(crossNodePVCIssues) > 0 {
+		fmt.Printf("CROSS-NODE PVC ISSUES:\n")
+		fmt.Printf("%-50s %s\n", "PVC", "AFFECTED NODES")
+		fmt.Printf("%-50s %s\n", "---", "--------------")
+		for _, issue := range crossNodePVCIssues {
+			pvc := issue.PVC
+			if pvc == "" {
+				pvc = "-"
+			}
+			
+			// Extract nodes from metadata if available
+			nodes := "-"
+			if nodesStr, exists := issue.Metadata["nodes"]; exists {
+				nodes = nodesStr
+			} else if issue.Node != "" {
+				nodes = issue.Node
+			}
+			
+			fmt.Printf("%-50s %s\n", pvc, nodes)
 		}
-		
-		fmt.Printf("%-20s %-40s %s\n", node, pvc, volume)
+		fmt.Printf("\n")
+	}
+
+	// Event-based Issues
+	if len(eventIssues) > 0 {
+		fmt.Printf("EVENT-BASED ISSUES:\n")
+		fmt.Printf("%-20s %-30s %s\n", "NODE", "PVC", "VOLUME")
+		fmt.Printf("%-20s %-30s %s\n", "----", "---", "------")
+		for _, issue := range eventIssues {
+			node := issue.Node
+			if node == "" {
+				node = "-"
+			}
+			pvc := issue.PVC
+			if pvc == "" {
+				pvc = "-"
+			}
+			volume := issue.Volume
+			if volume == "" {
+				volume = "-"
+			}
+			fmt.Printf("%-20s %-30s %s\n", node, pvc, volume)
+		}
+		fmt.Printf("\n")
+	}
+
+	// Other Issues
+	if len(otherIssues) > 0 {
+		fmt.Printf("OTHER ISSUES:\n")
+		fmt.Printf("%-20s %-30s %s\n", "NODE", "PVC", "VOLUME")
+		fmt.Printf("%-20s %-30s %s\n", "----", "---", "------")
+		for _, issue := range otherIssues {
+			node := issue.Node
+			if node == "" {
+				node = "-"
+			}
+			pvc := issue.PVC
+			if pvc == "" {
+				pvc = "-"
+			}
+			volume := issue.Volume
+			if volume == "" {
+				volume = "-"
+			}
+			fmt.Printf("%-20s %-30s %s\n", node, pvc, volume)
+		}
 	}
 
 	return nil
