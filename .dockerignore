@@ -1,0 +1,28 @@
+# Git and version control
+.git
+.gitignore
+
+# Build artifacts
+kubectl-csi_scan
+coverage.html
+coverage.out
+
+# Development files
+*.md
+CLAUDE.md
+
+# Go mod cache
+vendor/
+
+# IDE files
+.vscode/
+.idea/
+
+# Temporary files
+*.tmp
+*.swp
+*~
+
+# OS files
+.DS_Store
+Thumbs.db

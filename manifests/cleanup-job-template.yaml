@@ -1,0 +1,175 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: csi-mount-cleanup-{{.NodeName}}
+  namespace: {{.Namespace}}
+  labels:
+    app: kubectl-csi-scan
+    component: cleanup-job
+    node: {{.NodeName}}
+    kubectl-csi-scan/managed: "true"
+  annotations:
+    kubectl-csi-scan/created-by: kubectl-csi-scan
+    kubectl-csi-scan/node: {{.NodeName}}
+    kubectl-csi-scan/dry-run: "{{.DryRun}}"
+spec:
+  # Run once and don't restart on failure to avoid repeated mount operations
+  backoffLimit: 0
+  completions: 1
+  parallelism: 1
+  
+  # Clean up job after 1 hour to avoid accumulating old jobs
+  ttlSecondsAfterFinished: 3600
+  
+  template:
+    metadata:
+      labels:
+        app: kubectl-csi-scan
+        component: cleanup-job
+        node: {{.NodeName}}
+    spec:
+      restartPolicy: Never
+      
+      # Schedule on the specific node that needs cleanup
+      nodeSelector:
+        kubernetes.io/hostname: {{.NodeName}}
+      
+      # Tolerate any taints to ensure we can run on problematic nodes
+      tolerations:
+      - operator: Exists
+        effect: NoSchedule
+      - operator: Exists
+        effect: NoExecute
+      - operator: Exists
+        effect: PreferNoSchedule
+      
+      # Use host network for better node-level access
+      hostNetwork: true
+      hostPID: true
+      
+      # High priority to ensure cleanup jobs can run
+      priorityClassName: system-node-critical
+      
+      serviceAccountName: {{.ServiceAccount}}
+      
+      containers:
+      - name: csi-mount-cleanup
+        image: {{.Image}}
+        imagePullPolicy: {{.ImagePullPolicy}}
+        
+        # Run as root for mount operations
+        securityContext:
+          privileged: true
+          runAsUser: 0
+          runAsGroup: 0
+          
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: DRY_RUN
+          value: "{{.DryRun}}"
+        - name: VERBOSE
+          value: "{{.Verbose}}"
+        
+        # Mount host paths needed for CSI mount cleanup
+        volumeMounts:
+        - name: kubelet-dir
+          mountPath: /var/lib/kubelet
+          mountPropagation: Bidirectional
+        - name: host-proc
+          mountPath: /host/proc
+          readOnly: true
+        - name: host-sys
+          mountPath: /host/sys
+          readOnly: true
+        
+        # Resource limits to prevent cleanup job from overwhelming node
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+        
+        # Command to run the cleanup script
+        command: ["/usr/local/bin/cleanup-mounts.sh"]
+        args: 
+        {{- if .DryRun}}
+        - "--dry-run"
+        {{- end}}
+        {{- if .Verbose}}
+        - "--verbose"
+        {{- end}}
+        
+      volumes:
+      - name: kubelet-dir
+        hostPath:
+          path: /var/lib/kubelet
+          type: Directory
+      - name: host-proc
+        hostPath:
+          path: /proc
+          type: Directory
+      - name: host-sys
+        hostPath:
+          path: /sys
+          type: Directory
+
+---
+# ServiceAccount for cleanup jobs
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{.ServiceAccount}}
+  namespace: {{.Namespace}}
+  labels:
+    app: kubectl-csi-scan
+    component: cleanup-service-account
+
+---
+# ClusterRole with minimal permissions needed for cleanup operations
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubectl-csi-scan-cleanup
+  labels:
+    app: kubectl-csi-scan
+    component: cleanup-rbac
+rules:
+# Read access to nodes for validation
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get", "list"]
+# Read access to volume attachments to verify cleanup
+- apiGroups: ["storage.k8s.io"]
+  resources: ["volumeattachments"]
+  verbs: ["get", "list"]
+# Read access to persistent volumes and claims for context
+- apiGroups: [""]
+  resources: ["persistentvolumes", "persistentvolumeclaims"]
+  verbs: ["get", "list"]
+# Read events to check for mount-related issues
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["get", "list"]
+
+---
+# ClusterRoleBinding to grant permissions to the service account
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubectl-csi-scan-cleanup
+  labels:
+    app: kubectl-csi-scan
+    component: cleanup-rbac
+subjects:
+- kind: ServiceAccount
+  name: {{.ServiceAccount}}
+  namespace: {{.Namespace}}
+roleRef:
+  kind: ClusterRole
+  name: kubectl-csi-scan-cleanup
+  apiGroup: rbac.authorization.k8s.io

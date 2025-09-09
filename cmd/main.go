@@ -14,6 +14,7 @@ import (
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/client-go/kubernetes"
 
+	"github.com/jdambly/kubectl-csi-scan/pkg/cleanup"
 	"github.com/jdambly/kubectl-csi-scan/pkg/client"
 	"github.com/jdambly/kubectl-csi-scan/pkg/detect"
 	"github.com/jdambly/kubectl-csi-scan/pkg/types"
@@ -63,6 +64,7 @@ in attached state, preventing proper pod scheduling and volume cleanup.`,
 	cmd.AddCommand(newDetectCmd())
 	cmd.AddCommand(newAnalyzeCmd())
 	cmd.AddCommand(newMetricsCmd())
+	cmd.AddCommand(newCleanupCmd())
 
 	return cmd
 }
@@ -167,6 +169,139 @@ This helps set up proactive monitoring to detect issues before they impact appli
 		"Write output to file instead of stdout")
 
 	return cmd
+}
+
+func newCleanupCmd() *cobra.Command {
+	var (
+		targetNodes      []string
+		dryRun          bool
+		verbose         bool
+		image           string
+		imagePullPolicy string
+		namespace       string
+		serviceAccount  string
+		timeout         time.Duration
+	)
+
+	cmd := &cobra.Command{
+		Use:   "cleanup",
+		Short: "Create Kubernetes jobs to clean up stuck CSI mounts on nodes",
+		Long: `Create and run Kubernetes jobs that clean up stuck CSI mount references
+on specified nodes. This addresses the mount cleanup issues detected by the
+detection methods.
+
+The cleanup jobs run privileged containers on target nodes to safely unmount
+stuck CSI mount references that prevent proper volume detachment.
+
+Examples:
+  # Dry run cleanup on specific nodes
+  kubectl csi-mount-detective cleanup --nodes=knode57,knode55 --dry-run
+
+  # Perform actual cleanup on nodes with issues
+  kubectl csi-mount-detective cleanup --nodes=knode57,knode55
+
+  # Cleanup with custom container image
+  kubectl csi-mount-detective cleanup --nodes=knode57 --image=myregistry/csi-cleanup:latest
+
+  # Cleanup with verbose logging
+  kubectl csi-mount-detective cleanup --nodes=knode57 --verbose
+
+Security Notes:
+- Cleanup jobs run with privileged security context
+- Jobs have access to host filesystem mount points
+- Use --dry-run first to verify what would be cleaned up`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runCleanup(targetNodes, dryRun, verbose, image, imagePullPolicy, namespace, serviceAccount, timeout)
+		},
+	}
+
+	cmd.Flags().StringSliceVar(&targetNodes, "nodes", []string{}, 
+		"Target nodes for cleanup (required)")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, 
+		"Show what would be cleaned up without making changes")
+	cmd.Flags().BoolVar(&verbose, "verbose", false, 
+		"Enable verbose logging in cleanup jobs")
+	cmd.Flags().StringVar(&image, "image", "kubectl-csi-scan:latest", 
+		"Container image for cleanup jobs")
+	cmd.Flags().StringVar(&imagePullPolicy, "image-pull-policy", "IfNotPresent", 
+		"Image pull policy for cleanup jobs")
+	cmd.Flags().StringVar(&namespace, "namespace", "default", 
+		"Namespace to create cleanup jobs in")
+	cmd.Flags().StringVar(&serviceAccount, "service-account", "kubectl-csi-scan-cleanup", 
+		"Service account for cleanup jobs")
+	cmd.Flags().DurationVar(&timeout, "timeout", 10*time.Minute, 
+		"Timeout for cleanup job completion")
+
+	cmd.MarkFlagRequired("nodes")
+
+	return cmd
+}
+
+func runCleanup(targetNodes []string, dryRun, verbose bool, image, imagePullPolicy, namespace, serviceAccount string, timeout time.Duration) error {
+	if len(targetNodes) == 0 {
+		return fmt.Errorf("no target nodes specified - use --nodes flag")
+	}
+
+	log.Info().
+		Strs("nodes", targetNodes).
+		Bool("dry_run", dryRun).
+		Bool("verbose", verbose).
+		Str("image", image).
+		Str("namespace", namespace).
+		Dur("timeout", timeout).
+		Msg("starting cleanup job creation")
+
+	// Build Kubernetes client
+	kubeClient, err := buildKubernetesClient()
+	if err != nil {
+		log.Error().Err(err).Msg("failed to build Kubernetes client")
+		return newClientError(err)
+	}
+
+	// Create cleanup job manager
+	jobManager := cleanup.NewCleanupJobManager(kubeClient, namespace)
+
+	// Progress feedback
+	fmt.Fprintf(os.Stderr, "Creating cleanup jobs for %d node(s)...\n", len(targetNodes))
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	var createdJobs []string
+	var failed []string
+
+	for _, node := range targetNodes {
+		jobConfig := cleanup.CleanupJobConfig{
+			NodeName:        node,
+			DryRun:          dryRun,
+			Verbose:         verbose,
+			Image:           image,
+			ImagePullPolicy: imagePullPolicy,
+			Namespace:       namespace,
+			ServiceAccount:  serviceAccount,
+		}
+
+		jobName, err := jobManager.CreateCleanupJob(ctx, jobConfig)
+		if err != nil {
+			log.Error().Err(err).Str("node", node).Msg("failed to create cleanup job")
+			failed = append(failed, node)
+			continue
+		}
+
+		createdJobs = append(createdJobs, jobName)
+		fmt.Fprintf(os.Stderr, "✅ Created job %s for node %s\n", jobName, node)
+	}
+
+	if len(failed) > 0 {
+		fmt.Fprintf(os.Stderr, "❌ Failed to create jobs for nodes: %v\n", failed)
+	}
+
+	if len(createdJobs) > 0 {
+		fmt.Fprintf(os.Stderr, "\nMonitoring job progress...\n")
+		return jobManager.WaitForJobs(ctx, createdJobs)
+	}
+
+	return fmt.Errorf("no cleanup jobs were created successfully")
 }
 
 func runDetect(methods []string, targetDriver, outputFormat string, recommendCleanup bool, minSeverity string) error {
